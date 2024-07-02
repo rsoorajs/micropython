@@ -59,6 +59,12 @@
 
 // options to control how MicroPython is built
 
+// Due to the use of LTO and the unknown distance between nlr.o and nlrthumb.o code,
+// MCUs using the Thumb 1 instruction set must enable this NLR long jump feature.
+#if defined(NRF51822)
+#define MICROPY_NLR_THUMB_USE_LONG_JUMP    (1)
+#endif
+
 #ifndef MICROPY_VFS
 #define MICROPY_VFS                        (CORE_FEAT)
 #endif
@@ -329,6 +335,7 @@ long unsigned int rng_generate_random_word(void);
 #if MICROPY_HW_USB_CDC
 #include "device/usbd.h"
 #define MICROPY_HW_USBDEV_TASK_HOOK extern void tud_task(void); tud_task();
+#define MICROPY_EXCLUDE_SHARED_TINYUSB_USBD_CDC (1)
 #else
 #define MICROPY_HW_USBDEV_TASK_HOOK ;
 #endif

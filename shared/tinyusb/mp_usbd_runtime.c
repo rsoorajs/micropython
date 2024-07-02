@@ -44,7 +44,7 @@
 #include "device/usbd_pvt.h"
 #endif
 
-static bool in_usbd_task; // Flags if mp_usbd_task() is processing already
+static bool in_usbd_task; // Flags if mp_usbd_task() is currently running
 
 // Some top-level functions that manage global TinyUSB USBD state, not the
 // singleton object visible to Python
@@ -196,7 +196,7 @@ static uint8_t _runtime_dev_count_itfs(tusb_desc_interface_t const *itf_desc) {
     const tusb_desc_configuration_t *cfg_desc = (const void *)tud_descriptor_configuration_cb(0);
     const uint8_t *p_desc = (const void *)cfg_desc;
     const uint8_t *p_end = p_desc + cfg_desc->wTotalLength;
-    assert(p_desc <= itf_desc && itf_desc < p_end);
+    assert(p_desc <= (const uint8_t *)itf_desc && (const uint8_t *)itf_desc < p_end);
     while (p_desc != (const void *)itf_desc && p_desc < p_end) {
         const uint8_t *next = tu_desc_next(p_desc);
 
@@ -250,8 +250,8 @@ static uint16_t _runtime_dev_claim_itfs(tusb_desc_interface_t const *itf_desc, u
 // configuration. Returns number of bytes to claim from descriptors pointed to
 // by itf_desc.
 //
-// This is a little fiddly as it's called before any compiled-in "static"
-// TinyUSB drivers, but we don't want to override those.
+// This is a little fiddly as it's called before any built-in TinyUSB drivers,
+// but we don't want to override those.
 //
 // Also, TinyUSB expects us to know how many interfaces to claim for each time
 // this function is called, and will behave unexpectedly if we claim the wrong
@@ -266,7 +266,7 @@ static uint16_t runtime_dev_open(uint8_t rhport, tusb_desc_interface_t const *it
         return 0;
     }
 
-    // If TinyUSB built-in drivers are enabled, don't claim any interface in the static range
+    // If TinyUSB built-in drivers are enabled, don't claim any interface in the built-in range
     if (mp_usb_device_builtin_enabled(usbd) && itf_desc->bInterfaceNumber < USBD_ITF_BUILTIN_MAX) {
         return 0;
     }
@@ -295,6 +295,7 @@ static bool runtime_dev_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_cont
     mp_obj_usb_device_t *usbd = MP_OBJ_TO_PTR(MP_STATE_VM(usbd));
     tusb_dir_t dir = request->bmRequestType_bit.direction;
     mp_buffer_info_t buf_info;
+    bool result;
 
     if (!usbd) {
         return false;
@@ -319,7 +320,7 @@ static bool runtime_dev_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_cont
 
     // Check if callback returned any data to submit
     if (mp_get_buffer(cb_res, &buf_info, dir == TUSB_DIR_IN ? MP_BUFFER_READ : MP_BUFFER_RW)) {
-        bool result = tud_control_xfer(USBD_RHPORT,
+        result = tud_control_xfer(USBD_RHPORT,
             request,
             buf_info.buf,
             buf_info.len);
@@ -328,17 +329,21 @@ static bool runtime_dev_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_cont
             // Keep buffer object alive until the transfer completes
             usbd->xfer_data[0][dir] = cb_res;
         }
-
-        return result;
     } else {
         // Expect True or False to stall or continue
+        result = mp_obj_is_true(cb_res);
 
-        if (stage == CONTROL_STAGE_ACK) {
+        if (stage == CONTROL_STAGE_SETUP && result) {
+            // If no additional data but callback says to continue transfer then
+            // queue a status response.
+            tud_control_status(rhport, request);
+        } else if (stage == CONTROL_STAGE_ACK) {
             // Allow data to be GCed once it's no longer in use
             usbd->xfer_data[0][dir] = mp_const_none;
         }
-        return mp_obj_is_true(cb_res);
     }
+
+    return result;
 }
 
 static bool runtime_dev_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes) {
@@ -400,7 +405,7 @@ usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count) {
 
 // Top-level USB device subsystem init.
 //
-// Makes an on-demand call to mp_usbd_activate(), if USB is needed.
+// Initialises TinyUSB and/or re-activates it, provided USB is needed.
 //
 // This is called on any soft reset after boot.py runs, or on demand if the
 // user activates USB and it hasn't activated yet.
@@ -414,7 +419,7 @@ void mp_usbd_init(void) {
         // Builtin  drivers are available, so initialise as defaults
         need_usb = true;
         #else
-        // No static drivers, nothing to initialise
+        // No builtin drivers, nothing to initialise
         need_usb = false;
         #endif
     } else {
@@ -431,11 +436,12 @@ void mp_usbd_init(void) {
 // Top-level USB device deinit.
 //
 // This variant is called from soft reset, NULLs out the USB device
-// singleton instance from MP_STATE_VM, and disconnects the port.
+// singleton instance from MP_STATE_VM, and disconnects the port if a
+// runtime device was active.
 void mp_usbd_deinit(void) {
     mp_obj_usb_device_t *usbd = MP_OBJ_TO_PTR(MP_STATE_VM(usbd));
     MP_STATE_VM(usbd) = MP_OBJ_NULL;
-    if (usbd) {
+    if (usbd && usbd->active) {
         // Disconnect if a runtime USB device was active
         mp_usbd_disconnect(usbd);
     }
@@ -466,12 +472,17 @@ static void mp_usbd_disconnect(mp_obj_usb_device_t *usbd) {
     #if MICROPY_HW_USB_CDC
     // Ensure no pending static CDC writes, as these can cause TinyUSB to crash
     tud_cdc_write_clear();
+    // Prevent cdc write flush from initiating any new transfers while disconnecting
+    usbd_edpt_stall(USBD_RHPORT, USBD_CDC_EP_IN);
     #endif
 
     bool was_connected = tud_connected();
     tud_disconnect();
     if (was_connected) {
-        mp_hal_delay_ms(50); // TODO: Always???
+        // Need to ensure a long enough delay before TinyUSB re-connects that
+        // the host triggers a bus reset. This may happen anyway, but delaying here
+        // lets us be "belt and braces" sure.
+        mp_hal_delay_ms(50);
     }
 }
 

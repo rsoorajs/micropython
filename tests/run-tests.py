@@ -678,9 +678,22 @@ def run_tests(pyb, tests, args, result_dir, num_threads=1):
             )  # RA fsp rtc function doesn't support nano sec info
         elif args.target == "qemu-arm":
             skip_tests.add("misc/print_exception.py")  # requires sys stdfiles
+        elif args.target == "qemu-riscv":
+            skip_tests.add("misc/print_exception.py")  # requires sys stdfiles
         elif args.target == "webassembly":
             skip_tests.add("basics/string_format_modulo.py")  # can't print nulls to stdout
             skip_tests.add("basics/string_strip.py")  # can't print nulls to stdout
+            skip_tests.add("extmod/asyncio_basic2.py")
+            skip_tests.add("extmod/asyncio_cancel_self.py")
+            skip_tests.add("extmod/asyncio_current_task.py")
+            skip_tests.add("extmod/asyncio_exception.py")
+            skip_tests.add("extmod/asyncio_gather_finished_early.py")
+            skip_tests.add("extmod/asyncio_get_event_loop.py")
+            skip_tests.add("extmod/asyncio_heaplock.py")
+            skip_tests.add("extmod/asyncio_loop_stop.py")
+            skip_tests.add("extmod/asyncio_new_event_loop.py")
+            skip_tests.add("extmod/asyncio_threadsafeflag.py")
+            skip_tests.add("extmod/asyncio_wait_for_fwd.py")
             skip_tests.add("extmod/binascii_a2b_base64.py")
             skip_tests.add("extmod/re_stack_overflow.py")
             skip_tests.add("extmod/time_res.py")
@@ -691,7 +704,6 @@ def run_tests(pyb, tests, args, result_dir, num_threads=1):
             skip_tests.add("micropython/emg_exc.py")
             skip_tests.add("micropython/extreme_exc.py")
             skip_tests.add("micropython/heapalloc_exc_compressed_emg_exc.py")
-            skip_tests.add("micropython/import_mpy_invalid.py")
 
     # Some tests are known to fail on 64-bit machines
     if pyb is None and platform.architecture()[0] == "64bit":
@@ -706,9 +718,6 @@ def run_tests(pyb, tests, args, result_dir, num_threads=1):
     if args.emit == "native":
         skip_tests.add("basics/gen_yield_from_close.py")  # require raise_varargs
         skip_tests.update(
-            {"basics/async_%s.py" % t for t in "with with2 with_break with_return".split()}
-        )  # require async_with
-        skip_tests.update(
             {"basics/%s.py" % t for t in "try_reraise try_reraise2".split()}
         )  # require raise_varargs
         skip_tests.add("basics/annotate_var.py")  # requires checking for unbound local
@@ -719,10 +728,6 @@ def run_tests(pyb, tests, args, result_dir, num_threads=1):
         skip_tests.add("basics/sys_tracebacklimit.py")  # requires traceback info
         skip_tests.add("basics/try_finally_return2.py")  # requires raise_varargs
         skip_tests.add("basics/unboundlocal.py")  # requires checking for unbound local
-        skip_tests.add("extmod/asyncio_event.py")  # unknown issue
-        skip_tests.add("extmod/asyncio_lock.py")  # requires async with
-        skip_tests.add("extmod/asyncio_micropython.py")  # unknown issue
-        skip_tests.add("extmod/asyncio_wait_for.py")  # unknown issue
         skip_tests.add("misc/features.py")  # requires raise_varargs
         skip_tests.add(
             "misc/print_exception.py"
@@ -1038,6 +1043,7 @@ the last matching regex is used:
     LOCAL_TARGETS = (
         "unix",
         "qemu-arm",
+        "qemu-riscv",
         "webassembly",
     )
     EXTERNAL_TARGETS = (
@@ -1141,6 +1147,12 @@ the last matching regex is used:
                     "inlineasm",
                     "ports/qemu-arm",
                 )
+            elif args.target == "qemu-riscv":
+                if not args.write_exp:
+                    raise ValueError("--target=qemu-riscv must be used with --write-exp")
+                # Generate expected output files for qemu run.
+                # This list should match the test_dirs tuple in tinytest-codegen.py.
+                test_dirs += ("float",)
             elif args.target == "webassembly":
                 test_dirs += ("float", "ports/webassembly")
         else:
